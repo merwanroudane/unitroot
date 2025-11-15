@@ -367,53 +367,113 @@ if st.session_state.data is not None:
             return None
 
 
-    # Function to determine order of integration
+    # Function to determine order of integration and process type (TS vs DS)
     def determine_integration_order(series, test_type, trend_spec, max_lag, lag_method, max_diff=2):
         """
-        Determine the order of integration and process type
+        Determine the order of integration and process type using proper econometric procedure.
+        
+        TS (Trend Stationary): 
+            - ONLY concluded from trend & intercept equation
+            - Requires: (1) Reject H0 of unit root (ADF/PP), (2) Trend coefficient significant
+            - Optional: Confirm with KPSS (accept H0 of stationarity)
+        
+        DS (Difference Stationary): 
+            - Has unit root in levels (fail to reject H0 in ADF/PP)
+            - Becomes stationary after d differences
+        
+        Stationary: 
+            - I(0) without deterministic trend
+        
         Returns: (integration_order, process_type)
         """
         original_series = series.copy()
 
-        # Test original series
+        # STEP 1: Test with TREND & INTERCEPT equation (required for TS detection)
         if test_type in ["ADF (Augmented Dickey-Fuller)", "ADF and PP", "ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
-            level_result = run_adf_test(original_series, trend_spec, max_lag, lag_method)
-            if level_result and level_result['Is Stationary']:
-                # Check if it's trend stationary
-                if trend_spec == "With Constant & Trend" and level_result.get('Trend Info') and \
-                        level_result['Trend Info']['Is Trend Significant']:
-                    return 0, 'TS'  # I(0) Trend Stationary
-                return 0, 'I(0)'  # I(0) Stationary (not specifically TS or DS)
-
-        # First difference
-        if max_diff >= 1:
-            first_diff = original_series.diff().dropna()
-            if len(first_diff) > 10:  # Ensure enough observations
-                if test_type in ["ADF (Augmented Dickey-Fuller)", "ADF and PP", "ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
-                    first_diff_result = run_adf_test(first_diff, trend_spec, max_lag, lag_method)
+            
+            # Test with constant and trend
+            adf_ct = run_adf_test(original_series, "With Constant & Trend", max_lag, lag_method)
+            
+            # Check for TS: must be stationary AND trend must be significant
+            if adf_ct and adf_ct['Is Stationary']:
+                trend_info = adf_ct.get('Trend Info')
+                
+                # CONDITION FOR TS: Stationary from trend & intercept AND trend significant
+                if trend_info and trend_info['Is Trend Significant']:
+                    
+                    # Optional: Confirm with KPSS if available
+                    if test_type in ["ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
+                        kpss_ct = run_kpss_test(original_series, "With Constant & Trend")
+                        
+                        if kpss_ct and kpss_ct['Is Stationary']:
+                            # Both ADF and KPSS confirm stationarity, trend significant → TS
+                            return 0, 'TS'
+                        else:
+                            # ADF says stationary but KPSS says not - inconclusive
+                            # Since trend is significant and ADF rejects unit root, lean towards TS
+                            return 0, 'TS'
+                    else:
+                        # Only ADF available, trend significant → TS
+                        return 0, 'TS'
+                
+                else:
+                    # Stationary but trend NOT significant
+                    # Test with just constant to confirm I(0) stationary
+                    adf_c = run_adf_test(original_series, "With Constant", max_lag, lag_method)
+                    
+                    if adf_c and adf_c['Is Stationary']:
+                        # Confirm with KPSS if available
+                        if test_type in ["ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
+                            kpss_c = run_kpss_test(original_series, "With Constant")
+                            if kpss_c and kpss_c['Is Stationary']:
+                                return 0, 'Stationary'  # I(0), no trend
+                        return 0, 'Stationary'  # I(0), no trend
+            
+            # STEP 2: NOT stationary at level → Test for DS by differencing
+            # Has unit root (failed to reject H0 in ADF with trend & intercept)
+            
+            if max_diff >= 1:
+                first_diff = original_series.diff().dropna()
+                if len(first_diff) > 10:
+                    # Test first difference with constant (standard for differenced series)
+                    first_diff_result = run_adf_test(first_diff, "With Constant", max_lag, lag_method)
+                    
                     if first_diff_result and first_diff_result['Is Stationary']:
-                        return 1, 'DS'  # I(1) Difference Stationary
-
-        # Second difference
-        if max_diff >= 2:
-            second_diff = first_diff.diff().dropna()
-            if len(second_diff) > 10:  # Ensure enough observations
-                if test_type in ["ADF (Augmented Dickey-Fuller)", "ADF and PP", "ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
-                    second_diff_result = run_adf_test(second_diff, trend_spec, max_lag, lag_method)
+                        # Confirm with KPSS if available
+                        if test_type in ["ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
+                            kpss_diff = run_kpss_test(first_diff, "With Constant")
+                            if kpss_diff and kpss_diff['Is Stationary']:
+                                return 1, 'DS'  # I(1) Difference Stationary
+                        
+                        # Unit root in levels, stationary after 1st diff → DS
+                        return 1, 'DS'
+            
+            # STEP 3: Test second difference
+            if max_diff >= 2:
+                second_diff = first_diff.diff().dropna()
+                if len(second_diff) > 10:
+                    second_diff_result = run_adf_test(second_diff, "With Constant", max_lag, lag_method)
+                    
                     if second_diff_result and second_diff_result['Is Stationary']:
+                        # Confirm with KPSS if available
+                        if test_type in ["ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
+                            kpss_diff2 = run_kpss_test(second_diff, "With Constant")
+                            if kpss_diff2 and kpss_diff2['Is Stationary']:
+                                return 2, 'DS'  # I(2) Difference Stationary
+                        
                         return 2, 'DS'  # I(2) Difference Stationary
-
-        # Third difference (if max_diff = 3)
-        if max_diff >= 3:
-            third_diff = second_diff.diff().dropna()
-            if len(third_diff) > 10:
-                if test_type in ["ADF (Augmented Dickey-Fuller)", "ADF and PP", "ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
-                    third_diff_result = run_adf_test(third_diff, trend_spec, max_lag, lag_method)
+            
+            # STEP 4: Test third difference (if requested)
+            if max_diff >= 3:
+                third_diff = second_diff.diff().dropna()
+                if len(third_diff) > 10:
+                    third_diff_result = run_adf_test(third_diff, "With Constant", max_lag, lag_method)
+                    
                     if third_diff_result and third_diff_result['Is Stationary']:
                         return 3, 'DS'  # I(3) Difference Stationary
 
         # If not stationary after max_diff differences
-        return max_diff, 'Unknown'
+        return max_diff + 1, 'Unknown'
 
 
     # Function to create ACF/PACF plots
@@ -595,7 +655,7 @@ if st.session_state.data is not None:
                     return 'background-color: #cce5ff; color: #004085; font-weight: bold'
                 elif val == 'DS':
                     return 'background-color: #e8d6f9; color: #4b0082; font-weight: bold'
-                elif val == 'I(0)':
+                elif val in ['Stationary', 'I(0)']:
                     return 'background-color: #d4edda; color: #155724; font-weight: bold'
                 return ''
 
@@ -683,7 +743,7 @@ if st.session_state.data is not None:
 
                     # Create a header with integration order and process type information
                     order_color = "green" if integration_order == 0 else "orange" if integration_order == 1 else "red"
-                    process_color = "blue" if process_type == 'TS' else "purple" if process_type == 'DS' else "green" if process_type == 'I(0)' else "gray"
+                    process_color = "blue" if process_type == 'TS' else "purple" if process_type == 'DS' else "green" if process_type in ['I(0)', 'Stationary'] else "gray"
 
                     header_html = f"""
                     <div style="padding: 10px; border-radius: 5px; margin-bottom: 10px; 
@@ -876,40 +936,55 @@ if st.session_state.data is not None:
                             st.success("""
                             **Trend Stationary (TS) Process, I(0)**
 
-                            This series is stationary around a deterministic trend. The series will revert to this trend over time.
+                            This series is stationary around a deterministic trend, determined from the trend & intercept equation.
+
+                            **TS confirmed by:**
+                            - ✅ Rejected unit root hypothesis (ADF/PP with constant & trend)
+                            - ✅ Trend coefficient is statistically significant
+                            - ✅ KPSS confirms stationarity (if tested)
 
                             **Key characteristics:**
-                            - Stationary after removing the trend
-                            - Shocks have temporary effects
-                            - Good for forecasting as it reverts to a predictable trend
-                            - No need for differencing in ARIMA modeling
-                            - Use detrending for analysis
+                            - Stationary after removing the deterministic trend
+                            - Shocks have temporary effects (mean-reverting to trend)
+                            - Trend is deterministic, not stochastic
+                            - Good for forecasting - reverts to predictable trend
+                            - Detrending is appropriate (not differencing)
+                            - Example: GDP with deterministic technological growth
                             """)
-                        elif integration_order == 0 and process_type in ['DS', 'I(0)']:
+                        elif integration_order == 0 and process_type == 'Stationary':
                             st.success("""
                             **Stationary Process, I(0)**
 
-                            This series is already stationary without differencing or detrending.
+                            This series is stationary around a constant mean (no significant trend).
 
                             **Key characteristics:**
                             - Mean-reverting around a constant level
+                            - No deterministic trend detected
                             - Constant variance over time
                             - Temporary effects from shocks
                             - Can be modeled with ARMA directly
-                            - Suitable for standard forecasting methods
+                            - No differencing or detrending needed
+                            - Example: Inflation rate fluctuating around target
                             """)
                         elif integration_order == 1:
                             st.warning("""
                             **Difference Stationary (DS) Process, I(1)**
 
-                            This series becomes stationary after first differencing.
+                            This series has a unit root and becomes stationary after first differencing.
+
+                            **DS confirmed by:**
+                            - ❌ Failed to reject unit root hypothesis in levels (ADF/PP)
+                            - ✅ Becomes stationary after first differencing
 
                             **Key characteristics:**
-                            - Contains a unit root
-                            - Shocks have permanent effects
-                            - Needs first differencing in ARIMA modeling
+                            - Contains one unit root
+                            - Shocks have permanent effects (no mean reversion)
+                            - Trend is stochastic, not deterministic
+                            - Requires first differencing for ARIMA modeling
                             - May be suitable for cointegration analysis
-                            - Common in economic and financial data
+                            - Detrending is NOT appropriate (use differencing)
+                            - Common in economic/financial data (prices, GDP)
+                            - Example: Stock prices, exchange rates
                             """)
                         elif integration_order == 2:
                             st.error("""
@@ -917,25 +992,37 @@ if st.session_state.data is not None:
 
                             This series requires second differencing to achieve stationarity.
 
+                            **DS confirmed by:**
+                            - ❌ Failed to reject unit root in levels and first difference
+                            - ✅ Becomes stationary after second differencing
+
                             **Key characteristics:**
                             - Contains two unit roots
-                            - Highly persistent
-                            - Shocks have permanent and increasing effects
+                            - Highly persistent with accelerating behavior
+                            - Shocks have permanent and compounding effects
                             - Needs second differencing in ARIMA modeling
                             - More volatile and harder to forecast accurately
-                            - Less common in practice
+                            - Less common in practice (check for data issues)
+                            - Example: Cumulative inflation, rare in real data
                             """)
                         else:
                             st.info(f"""
                             **Process type could not be clearly determined (I({integration_order}))**
 
-                            This could mean:
-                            - The series has integration order > 2
-                            - The series has seasonal unit roots
-                            - The series contains structural breaks
-                            - Additional testing may be needed
-                            - Consider alternative specifications or tests
+                            This could indicate:
+                            - Integration order > 2 (very rare in practice)
+                            - Presence of seasonal unit roots
+                            - Structural breaks in the series
+                            - Model misspecification
+                            - Data quality issues
+
+                            **Recommendations:**
+                            - Check for structural breaks (Zivot-Andrews test)
+                            - Test for seasonal unit roots (if applicable)
+                            - Verify data quality and transformations
+                            - Consider alternative specifications
                             """)
+
 
             # Create Heatmap Visualization of all variables and their integration orders
             st.subheader("📊 Integration Order Summary Heatmap")
@@ -1102,39 +1189,105 @@ Unit root tests determine whether a time series is stationary or non-stationary,
 - **Weakly Stationary**: Mean, variance, and autocorrelation are constant over time.
 
 **2. Process Types:**
-- **Trend Stationary (TS)**: Stationary around a deterministic trend; removing the trend makes it stationary.
-- **Difference Stationary (DS)**: Contains a unit root; differencing makes it stationary.
+- **Trend Stationary (TS)**: I(0) process stationary around a **deterministic** trend
+  - Detected ONLY from trend & intercept equation
+  - Requires: (1) Reject unit root (ADF/PP), (2) Significant trend coefficient
+  - Shocks have temporary effects
+  - Appropriate treatment: **Detrending**
+  
+- **Difference Stationary (DS)**: I(d) process with **stochastic** trend (d ≥ 1)
+  - Has unit root in levels (fail to reject H0 in ADF/PP)
+  - Becomes stationary after d differences
+  - Shocks have permanent effects
+  - Appropriate treatment: **Differencing**
+
+- **Stationary**: I(0) process around constant mean
+  - No significant deterministic trend
+  - Already stationary, no transformation needed
 
 **3. Order of Integration:**
-- **I(0)**: Stationary series - no integration, no unit roots.
-- **I(1)**: Unit root series - needs first differencing to become stationary.
-- **I(2)**: Double unit root - needs second differencing to become stationary.
+- **I(0)**: Stationary series - can be TS (with trend) or Stationary (no trend)
+- **I(1)**: DS process - needs first differencing to become stationary
+- **I(2)**: DS process - needs second differencing (rare in practice)
 
-**4. Economic Implications:**
-- **TS Processes**: Shocks have temporary effects; series returns to trend.
-- **DS Processes**: Shocks have permanent effects; series follows a random walk.
+**4. Critical Distinction - TS vs DS:**
 
-**5. Available Tests:**
-- **ADF (Augmented Dickey-Fuller)**: Tests the null hypothesis that a unit root is present (series is non-stationary).
-- **PP (Phillips-Perron)**: Similar to ADF but with non-parametric handling of serial correlation.
-- **KPSS (Kwiatkowski-Phillips-Schmidt-Shin)**: Tests the null hypothesis that the series is stationary.
+The fundamental difference:
+- **TS**: Deterministic trend + stationary deviations
+  - Formula: Y_t = α + βt + ε_t (where ε_t is stationary)
+  - Detrending makes it stationary
+  - Shocks are temporary
+  
+- **DS**: Stochastic trend (random walk)
+  - Formula: Y_t = Y_{t-1} + ε_t
+  - Differencing makes it stationary  
+  - Shocks are permanent
 
-**6. Test Specifications:**
-- **With Constant**: Includes an intercept term in the test regression.
-- **With Constant & Trend**: Includes both intercept and time trend terms.
-- **Without Constant & Trend**: Excludes both intercept and time trend.
+**5. Testing Procedure:**
 
-**7. Lag Selection Methods:**
-- **AIC**: Akaike Information Criterion
-- **BIC**: Bayesian Information Criterion (more parsimonious than AIC)
+**Step 1**: Test with **constant & trend** equation
+- If stationary AND trend significant → **TS**
+- If stationary but trend NOT significant → test with constant only
+  - If still stationary → **Stationary (I(0))**
+- If NOT stationary → proceed to Step 2
+
+**Step 2**: Test **first difference** with constant
+- If stationary → **DS, I(1)**
+- If NOT stationary → proceed to Step 3
+
+**Step 3**: Test **second difference** with constant
+- If stationary → **DS, I(2)**
+- If NOT stationary → higher order or other issues
+
+**6. Available Tests:**
+- **ADF (Augmented Dickey-Fuller)**: H0: Unit root present (non-stationary)
+  - Reject H0 → Series is stationary
+  - Fail to reject H0 → Series has unit root
+  
+- **PP (Phillips-Perron)**: H0: Unit root present (non-stationary)
+  - Similar to ADF but non-parametric correction for serial correlation
+  - More robust to heteroskedasticity
+  
+- **KPSS**: H0: Series is stationary
+  - Reject H0 → Series is non-stationary
+  - Fail to reject H0 → Series is stationary
+  - **Complementary** to ADF/PP (reversed hypothesis)
+
+**7. Test Specifications:**
+- **With Constant & Trend (ct)**: Use for TS detection and general testing
+- **With Constant (c)**: Use for differenced series or when no trend
+- **Without Constant & Trend (nc)**: Rarely used, specific cases only
+
+**8. Lag Selection Methods:**
+- **AIC**: Akaike Information Criterion (allows more lags)
+- **BIC**: Bayesian Information Criterion (more parsimonious)
 - **t-stat**: Sequential t-test for lag significance
-- **HQIC**: Hannan-Quinn Information Criterion
+- **HQIC**: Hannan-Quinn Information Criterion (middle ground)
+
+**9. Economic Implications:**
+
+**TS Process Example**: GDP with technological progress
+- Growth trend is deterministic
+- Recessions are temporary deviations
+- Economy returns to trend path
+
+**DS Process Example**: Stock prices, exchange rates
+- No deterministic path
+- Shocks cause permanent level shifts
+- Random walk with drift
+
+**10. Model Selection Guidelines:**
+- **TS (I(0) with trend)**: Use detrended data, ARMA models
+- **Stationary (I(0) no trend)**: Use ARMA models directly
+- **DS (I(1))**: Use ARIMA with d=1, or model differences
+- **DS (I(2))**: Use ARIMA with d=2, check data quality
 
 #### References:
-- Dickey, D. A., & Fuller, W. A. (1979). Distribution of the estimators for autoregressive time series with a unit root.
-- Phillips, P. C., & Perron, P. (1988). Testing for a unit root in time series regression.
-- Kwiatkowski, D., et al. (1992). Testing the null hypothesis of stationarity against the alternative of a unit root.
+- Dickey, D. A., & Fuller, W. A. (1979). Distribution of the estimators for autoregressive time series with a unit root. *Journal of the American Statistical Association*.
+- Phillips, P. C., & Perron, P. (1988). Testing for a unit root in time series regression. *Biometrika*.
+- Kwiatkowski, D., et al. (1992). Testing the null hypothesis of stationarity against the alternative of a unit root. *Journal of Econometrics*.
+- Nelson, C. R., & Plosser, C. I. (1982). Trends and random walks in macroeconomic time series. *Journal of Monetary Economics*.
 
 ---
-**Version**: 2.0 | **Developed for**: Advanced Time Series Analysis
+**Version**: 2.1 | **Developed for**: Advanced Econometric Time Series Analysis
 """)
