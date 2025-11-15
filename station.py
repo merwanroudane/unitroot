@@ -296,30 +296,36 @@ if st.session_state.data is not None:
             try:
                 from arch.unitroot import PhillipsPerron
                 
-                trend = 'n'
+                # Map trend specification
+                trend = 'n'  # no constant, no trend
                 if trend_spec == "With Constant":
                     trend = 'c'
                 elif trend_spec == "With Constant & Trend":
                     trend = 'ct'
                 
-                pp_test = PhillipsPerron(series, trend=trend, test_type='tau')
-                result = pp_test
+                # Initialize Phillips-Perron test
+                # lags=None means automatic lag selection
+                pp_test = PhillipsPerron(series, lags=None, trend=trend, test_type='tau')
                 
                 # For 'ct' regression, check if trend is significant
                 trend_info = None
                 if trend == 'ct':
                     trend_info = check_trend_significance(series, alpha=sig_level)
                 
+                # Extract results - access attributes directly
                 return {
-                    'Test Statistic': result.stat,
-                    'p-value': result.pvalue,
-                    'Lags Used': result.lags,
-                    'Critical Values': result.critical_values,
-                    'Is Stationary': result.pvalue < sig_level,
+                    'Test Statistic': pp_test.stat,
+                    'p-value': pp_test.pvalue,
+                    'Lags Used': pp_test.lags,
+                    'Critical Values': pp_test.critical_values,
+                    'Is Stationary': pp_test.pvalue < sig_level,
                     'Trend Info': trend_info
                 }
             except ImportError:
-                # Fallback to pmdarima approximation
+                # Fallback: arch package not installed
+                st.info("📦 arch package not installed. Install with: pip install arch")
+                st.info("Using simplified approximation for Phillips-Perron test.")
+                
                 result = ndiffs(series, test='pp', max_d=2)
                 
                 trend_info = None
@@ -334,8 +340,14 @@ if st.session_state.data is not None:
                     'Differencing Required': result,
                     'Is Stationary': result == 0,
                     'Trend Info': trend_info,
-                    'Note': 'Using pmdarima approximation. Install arch package for full PP test.'
+                    'Note': 'Approximation only. Install arch package (pip install arch) for full PP test.'
                 }
+            except Exception as e:
+                # If arch is available but PP test fails for some reason
+                st.warning(f"⚠️ Phillips-Perron test encountered an error: {e}")
+                st.info("This may be due to insufficient observations or data issues.")
+                return None
+                
         except Exception as e:
             st.warning(f"PP test failed: {e}")
             return None
