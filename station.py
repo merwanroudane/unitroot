@@ -1191,9 +1191,14 @@ if st.session_state.data is not None:
         """
         Determine the order of integration and process type using proper econometric procedure.
         
+        CRITICAL RULE:
+        TS (Trend Stationary) can ONLY be identified when user selects "With Constant & Trend".
+        If user selects "With Constant" or "Without Constant & Trend", TS will NEVER be returned.
+        
         IMPORTANT RULES:
         
         TS (Trend Stationary) - ONLY from trend & intercept equation:
+            - User MUST select "With Constant & Trend" specification
             - ADF & PP: p-value < 5% (reject H0 of unit root → NO unit root → stationary)
             - KPSS: p-value > 5% (fail to reject H0 of stationarity → stationary)
             - Trend coefficient MUST be significant (p-value < 5%)
@@ -1205,87 +1210,101 @@ if st.session_state.data is not None:
         
         Stationary (I(0) without trend):
             - Same stationarity criteria but trend NOT significant
+            - OR user selected a model without trend component
         
         Returns: (integration_order, process_type)
         """
         original_series = series.copy()
+        
+        # =============================================
+        # CRITICAL: TS can ONLY be identified from "With Constant & Trend" model
+        # =============================================
+        can_identify_ts = (trend_spec == "With Constant & Trend")
 
-        # STEP 1: Test with TREND & INTERCEPT equation (required for TS detection)
-        # TS can ONLY be identified from constant & trend model
+        # STEP 1: Test at level with the user-selected specification
         if test_type in ["ADF (Augmented Dickey-Fuller)", "ADF and PP", "ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
             
-            # Test with constant and trend - MANDATORY for TS detection
-            adf_ct = run_adf_test(original_series, "With Constant & Trend", max_lag, lag_method)
+            # Test with user-selected specification
+            adf_result = run_adf_test(original_series, trend_spec, max_lag, lag_method)
             
-            if adf_ct:
-                adf_stationary = adf_ct['Is Stationary']  # True if p-value < sig_level (reject H0 of unit root)
-                trend_info = adf_ct.get('Trend Info')
+            if adf_result:
+                adf_stationary = adf_result['Is Stationary']  # True if p-value < sig_level (reject H0 of unit root)
+                trend_info = adf_result.get('Trend Info')
+                # Trend info only available for "With Constant & Trend"
                 trend_significant = trend_info['Is Trend Significant'] if trend_info else False
                 
-                # Also run PP test if selected
+                # Also run PP test if selected (with same specification)
                 pp_stationary = None
                 if test_type in ["ADF and PP", "All Tests (ADF, PP, KPSS)"]:
-                    pp_ct = run_pp_test(original_series, "With Constant & Trend")
-                    if pp_ct and pp_ct['p-value'] is not None:
-                        pp_stationary = pp_ct['Is Stationary']
+                    pp_result = run_pp_test(original_series, trend_spec)
+                    if pp_result and pp_result['p-value'] is not None:
+                        pp_stationary = pp_result['Is Stationary']
                 
                 # Run KPSS test if selected
                 kpss_stationary = None
                 if test_type in ["ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
-                    kpss_ct = run_kpss_test(original_series, "With Constant & Trend")
-                    if kpss_ct:
+                    # KPSS only supports 'c' (constant) or 'ct' (constant & trend)
+                    kpss_spec = trend_spec if trend_spec != "Without Constant & Trend" else "With Constant"
+                    kpss_result = run_kpss_test(original_series, kpss_spec)
+                    if kpss_result:
                         # KPSS: H0 = stationary, H1 = unit root
                         # p-value > 5% means fail to reject H0 → stationary
                         # p-value < 5% means reject H0 → has unit root
-                        kpss_stationary = kpss_ct['Is Stationary']  # True if p-value > sig_level
+                        kpss_stationary = kpss_result['Is Stationary']  # True if p-value > sig_level
                 
                 # =============================================
                 # CHECK FOR TS (Trend Stationary)
+                # ONLY possible if user selected "With Constant & Trend"
                 # =============================================
-                # Requirements for TS:
-                # 1. ADF: p < 5% (reject unit root = NO unit root)
-                # 2. PP (if available): p < 5% (reject unit root = NO unit root)
-                # 3. KPSS (if available): p > 5% (fail to reject = stationary)
-                # 4. Trend coefficient SIGNIFICANT
-                
-                is_ts = False
-                if adf_stationary and trend_significant:
-                    # Basic condition met from ADF
-                    is_ts = True
+                if can_identify_ts:
+                    # Requirements for TS:
+                    # 1. User selected "With Constant & Trend" ✓ (already checked above)
+                    # 2. ADF: p < 5% (reject unit root = NO unit root)
+                    # 3. PP (if available): p < 5% (reject unit root = NO unit root)
+                    # 4. KPSS (if available): p > 5% (fail to reject = stationary)
+                    # 5. Trend coefficient SIGNIFICANT
                     
-                    # Check PP if available - must also show no unit root
-                    if pp_stationary is not None and not pp_stationary:
-                        is_ts = False  # PP says has unit root
+                    is_ts = False
+                    if adf_stationary and trend_significant:
+                        # Basic condition met from ADF
+                        is_ts = True
+                        
+                        # Check PP if available - must also show no unit root
+                        if pp_stationary is not None and not pp_stationary:
+                            is_ts = False  # PP says has unit root
+                        
+                        # Check KPSS if available - must confirm stationarity
+                        if kpss_stationary is not None and not kpss_stationary:
+                            # KPSS says NOT stationary (p < 5%), contradicts ADF
+                            # This suggests DIFFERENCE stationary, not trend stationary
+                            is_ts = False
                     
-                    # Check KPSS if available - must confirm stationarity
-                    if kpss_stationary is not None and not kpss_stationary:
-                        # KPSS says NOT stationary (p < 5%), contradicts ADF
-                        # This is the case where ADF rejects unit root but KPSS rejects stationarity
-                        # According to statsmodels: this suggests DIFFERENCE stationary, not trend stationary
-                        is_ts = False
-                
-                if is_ts:
-                    return 0, 'TS'  # Trend Stationary
+                    if is_ts:
+                        return 0, 'TS'  # Trend Stationary
                 
                 # =============================================
                 # CHECK FOR STATIONARY (I(0) without significant trend)
                 # =============================================
-                if adf_stationary and not trend_significant:
-                    # Stationary but no significant trend
-                    # Confirm with constant-only model
-                    adf_c = run_adf_test(original_series, "With Constant", max_lag, lag_method)
-                    
-                    if adf_c and adf_c['Is Stationary']:
-                        # Confirm with KPSS if available
+                # This applies when:
+                # - Series is stationary at level
+                # - Either trend is NOT significant, OR user didn't select ct model
+                
+                if adf_stationary:
+                    # For non-ct models, or ct model with non-significant trend
+                    if not can_identify_ts or not trend_significant:
+                        # Confirm stationarity
                         is_stationary = True
                         
-                        if test_type in ["ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
-                            kpss_c = run_kpss_test(original_series, "With Constant")
-                            if kpss_c and not kpss_c['Is Stationary']:
-                                is_stationary = False  # KPSS rejects stationarity
+                        # Check PP if available
+                        if pp_stationary is not None and not pp_stationary:
+                            is_stationary = False
+                        
+                        # Check KPSS if available
+                        if kpss_stationary is not None and not kpss_stationary:
+                            is_stationary = False  # KPSS rejects stationarity
                         
                         if is_stationary:
-                            return 0, 'Stationary'  # I(0), no trend
+                            return 0, 'Stationary'  # I(0), stationary without trend
             
             # =============================================
             # CHECK FOR DS (Difference Stationary)
