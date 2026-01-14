@@ -1,3 +1,22 @@
+"""
+Advanced Unit Root Testing Dashboard with Data Transformations
+Author: Dr. Merwan Roudane
+Email: merwanroudane920@gmail.com
+
+Features:
+- Comprehensive descriptive statistics
+- Multiple data transformations (Log, Percent Change, Difference, Standardized, Normalized, etc.)
+- Correlation heatmap with coolwarm colorscale
+- Kobayashi-McAleer tests for linear vs logarithmic transformations (for positive time series)
+- Unit root tests (ADF, PP, KPSS)
+- ACF/PACF analysis
+- Interactive Plotly visualizations
+
+Reference for KM Tests:
+Kobayashi, M. and McAleer, M. (1999). "Tests of Linear and Logarithmic Transformations 
+for Integrated Processes." Journal of the American Statistical Association, 94(447), 860-868.
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -12,15 +31,17 @@ from pmdarima.arima.utils import ndiffs
 import io
 import base64
 from scipy import stats
+from scipy.stats import norm, shapiro, skew, kurtosis
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from sklearn.preprocessing import PowerTransformer
 import warnings
 warnings.filterwarnings('ignore')
 
 # Set page configuration
 st.set_page_config(
-    page_title="Advanced Unit Root Testing App",
+    page_title="Advanced Unit Root Testing App - Dr. Merwan Roudane",
     page_icon="📊",
     layout="wide"
 )
@@ -54,20 +75,47 @@ st.markdown("""
     .integration-order-2 {color: #bb2124; font-weight: bold;}
     .process-ts {color: #3366cc; font-weight: bold;}
     .process-ds {color: #cc33ff; font-weight: bold;}
+    .author-box {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        padding: 15px;
+        border-radius: 10px;
+        margin-bottom: 20px;
+        text-align: center;
+    }
+    .km-test-box {
+        background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+        color: white;
+        padding: 15px;
+        border-radius: 10px;
+        margin: 10px 0;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# Title and introduction
-st.title("🔍 Advanced Time Series Unit Root Testing Dashboard")
+# Author information header
 st.markdown("""
-This application provides comprehensive unit root testing capabilities for time series data.
-Upload your data file, select variables to test, and configure test parameters to analyze stationarity.
-The app distinguishes between **Trend Stationary (TS)** and **Difference Stationary (DS)** processes,
-and determines the order of integration: I(0), I(1), or I(2).
+<div class="author-box">
+    <h2>🔬 Advanced Time Series Unit Root Testing Dashboard</h2>
+    <p><strong>Developed by: Dr. Merwan Roudane</strong></p>
+    <p>📧 merwanroudane920@gmail.com</p>
+</div>
+""", unsafe_allow_html=True)
+
+# Title and introduction
+st.markdown("""
+This application provides comprehensive unit root testing capabilities for time series data with:
+- **📊 Enhanced Descriptive Statistics** with interactive visualizations
+- **🔄 Data Transformations** (Log, Percent Change, Difference, Standardized, Normalized, Box-Cox, etc.)
+- **🔥 Correlation Heatmap** with coolwarm colorscale
+- **📈 Kobayashi-McAleer Tests** for choosing between linear and logarithmic transformations
+- **🧪 Unit Root Tests** (ADF, PP, KPSS) with TS/DS process identification
+- **📉 ACF/PACF Analysis** with interactive Plotly charts
 """)
 
 # Sidebar for inputs
 st.sidebar.header("Configuration")
+st.sidebar.markdown("**Author: Dr. Merwan Roudane**")
 
 # File upload
 uploaded_file = st.sidebar.file_uploader("Upload your data file", type=["xlsx", "csv", "xls"])
@@ -81,6 +129,472 @@ if 'test_results' not in st.session_state:
     st.session_state.test_results = {}
 if 'selected_vars' not in st.session_state:
     st.session_state.selected_vars = []
+if 'transformed_data' not in st.session_state:
+    st.session_state.transformed_data = None
+if 'km_test_results' not in st.session_state:
+    st.session_state.km_test_results = {}
+
+
+# ==================== DATA TRANSFORMATION FUNCTIONS ====================
+
+def apply_log_transform(series):
+    """Apply natural logarithm transformation (for positive values only)"""
+    if (series <= 0).any():
+        return None, "Series contains non-positive values. Log transformation not applicable."
+    return np.log(series), None
+
+def apply_log10_transform(series):
+    """Apply base-10 logarithm transformation"""
+    if (series <= 0).any():
+        return None, "Series contains non-positive values. Log10 transformation not applicable."
+    return np.log10(series), None
+
+def apply_log1p_transform(series):
+    """Apply log(1+x) transformation (handles zeros)"""
+    if (series < 0).any():
+        return None, "Series contains negative values. Log1p transformation not applicable."
+    return np.log1p(series), None
+
+def apply_sqrt_transform(series):
+    """Apply square root transformation"""
+    if (series < 0).any():
+        return None, "Series contains negative values. Square root transformation not applicable."
+    return np.sqrt(series), None
+
+def apply_cbrt_transform(series):
+    """Apply cube root transformation (handles negative values)"""
+    return np.cbrt(series), None
+
+def apply_percent_change(series):
+    """Apply percent change transformation"""
+    return series.pct_change() * 100, None
+
+def apply_first_difference(series):
+    """Apply first difference transformation"""
+    return series.diff(), None
+
+def apply_second_difference(series):
+    """Apply second difference transformation"""
+    return series.diff().diff(), None
+
+def apply_standardization(series):
+    """Apply standardization (z-score normalization)"""
+    return (series - series.mean()) / series.std(), None
+
+def apply_minmax_normalization(series):
+    """Apply min-max normalization (0-1 scaling)"""
+    return (series - series.min()) / (series.max() - series.min()), None
+
+def apply_robust_scaling(series):
+    """Apply robust scaling using median and IQR"""
+    q1 = series.quantile(0.25)
+    q3 = series.quantile(0.75)
+    iqr = q3 - q1
+    median = series.median()
+    if iqr == 0:
+        return None, "IQR is zero. Robust scaling not applicable."
+    return (series - median) / iqr, None
+
+def apply_box_cox_transform(series):
+    """Apply Box-Cox transformation"""
+    if (series <= 0).any():
+        return None, "Series contains non-positive values. Box-Cox transformation not applicable."
+    try:
+        transformed, lambda_param = stats.boxcox(series.dropna())
+        return pd.Series(transformed, index=series.dropna().index), f"Lambda = {lambda_param:.4f}"
+    except Exception as e:
+        return None, f"Box-Cox transformation failed: {str(e)}"
+
+def apply_yeo_johnson_transform(series):
+    """Apply Yeo-Johnson transformation (handles negative values)"""
+    try:
+        pt = PowerTransformer(method='yeo-johnson')
+        transformed = pt.fit_transform(series.values.reshape(-1, 1)).flatten()
+        return pd.Series(transformed, index=series.index), f"Lambda = {pt.lambdas_[0]:.4f}"
+    except Exception as e:
+        return None, f"Yeo-Johnson transformation failed: {str(e)}"
+
+def apply_inverse_transform(series):
+    """Apply inverse (1/x) transformation"""
+    if (series == 0).any():
+        return None, "Series contains zeros. Inverse transformation not applicable."
+    return 1 / series, None
+
+
+# ==================== KOBAYASHI-MCALEER TEST FUNCTIONS ====================
+
+def km_v1_test(y, p=None, max_p=12):
+    """
+    Kobayashi-McAleer V1 Test
+    Tests null hypothesis of linear integrated process (with drift) against logarithmic alternative.
+    Based on: Kobayashi & McAleer (1999), JASA, 94(447), 860-868.
+    """
+    try:
+        y = np.asarray(y).flatten()
+        n = len(y)
+        if np.any(y <= 0):
+            return None
+        
+        delta_y = np.diff(y)
+        y_lag = y[:-1]
+        
+        if p is None:
+            best_aic = np.inf
+            best_p = 0
+            for test_p in range(0, min(max_p, n // 4)):
+                try:
+                    if test_p == 0:
+                        X = sm.add_constant(np.ones(len(delta_y)))
+                    else:
+                        X_list = [np.ones(len(delta_y) - test_p)]
+                        for lag in range(1, test_p + 1):
+                            X_list.append(delta_y[test_p - lag:-lag] if lag < len(delta_y) - test_p else delta_y[:len(delta_y) - test_p])
+                        X = np.column_stack(X_list)
+                    y_temp = delta_y[test_p:] if test_p > 0 else delta_y
+                    model = sm.OLS(y_temp, X).fit()
+                    if model.aic < best_aic:
+                        best_aic = model.aic
+                        best_p = test_p
+                except:
+                    continue
+            p = best_p
+        
+        drift = np.mean(delta_y)
+        if p == 0:
+            residuals = delta_y - drift
+        else:
+            X = sm.add_constant(np.column_stack([delta_y[p-i:-i] for i in range(1, p+1)]))
+            model = sm.OLS(delta_y[p:], X).fit()
+            residuals = model.resid
+            drift = model.params[0]
+        
+        sigma_sq = np.var(residuals, ddof=1)
+        delta_y_sq = delta_y[p:]**2 if p > 0 else delta_y**2
+        y_lag_adj = y_lag[p:] if p > 0 else y_lag
+        
+        numerator = np.sum((delta_y_sq - sigma_sq) * (y_lag_adj - np.mean(y_lag_adj)))
+        denominator = np.sqrt(np.sum((delta_y_sq - sigma_sq)**2) * np.sum((y_lag_adj - np.mean(y_lag_adj))**2))
+        
+        if denominator == 0:
+            return None
+        
+        rho = numerator / denominator
+        V1 = np.sqrt(len(delta_y_sq)) * rho
+        p_value = 2 * (1 - norm.cdf(abs(V1)))
+        
+        return {
+            'statistic': V1, 'p_value': p_value, 'lag_order': p,
+            'drift_estimate': drift, 'variance_estimate': sigma_sq,
+            'test_type': 'V1', 'null_hypothesis': 'Linear integrated process (with drift)',
+            'alternative': 'Logarithmic transformation', 'reject_null': p_value < 0.05
+        }
+    except:
+        return None
+
+
+def km_v2_test(y, p=None, max_p=12):
+    """
+    Kobayashi-McAleer V2 Test
+    Tests null hypothesis of logarithmic integrated process (with drift) against linear alternative.
+    """
+    try:
+        y = np.asarray(y).flatten()
+        n = len(y)
+        if np.any(y <= 0):
+            return None
+        
+        log_y = np.log(y)
+        delta_log_y = np.diff(log_y)
+        
+        if p is None:
+            best_aic = np.inf
+            best_p = 0
+            for test_p in range(0, min(max_p, n // 4)):
+                try:
+                    if test_p == 0:
+                        X = sm.add_constant(np.ones(len(delta_log_y)))
+                    else:
+                        X_list = [np.ones(len(delta_log_y) - test_p)]
+                        for lag in range(1, test_p + 1):
+                            X_list.append(delta_log_y[test_p - lag:-lag] if lag < len(delta_log_y) - test_p else delta_log_y[:len(delta_log_y) - test_p])
+                        X = np.column_stack(X_list)
+                    y_temp = delta_log_y[test_p:] if test_p > 0 else delta_log_y
+                    model = sm.OLS(y_temp, X).fit()
+                    if model.aic < best_aic:
+                        best_aic = model.aic
+                        best_p = test_p
+                except:
+                    continue
+            p = best_p
+        
+        drift = np.mean(delta_log_y)
+        if p == 0:
+            residuals = delta_log_y - drift
+        else:
+            X = sm.add_constant(np.column_stack([delta_log_y[p-i:-i] for i in range(1, p+1)]))
+            model = sm.OLS(delta_log_y[p:], X).fit()
+            residuals = model.resid
+            drift = model.params[0]
+        
+        sigma_sq = np.var(residuals, ddof=1)
+        delta_log_y_sq = delta_log_y[p:]**2 if p > 0 else delta_log_y**2
+        y_lag_adj = y[:-1][p:] if p > 0 else y[:-1]
+        
+        numerator = np.sum((delta_log_y_sq - sigma_sq) * (y_lag_adj - np.mean(y_lag_adj)))
+        denominator = np.sqrt(np.sum((delta_log_y_sq - sigma_sq)**2) * np.sum((y_lag_adj - np.mean(y_lag_adj))**2))
+        
+        if denominator == 0:
+            return None
+        
+        rho = numerator / denominator
+        V2 = np.sqrt(len(delta_log_y_sq)) * rho
+        p_value = 2 * (1 - norm.cdf(abs(V2)))
+        
+        return {
+            'statistic': V2, 'p_value': p_value, 'lag_order': p,
+            'drift_estimate': drift, 'variance_estimate': sigma_sq,
+            'test_type': 'V2', 'null_hypothesis': 'Logarithmic integrated process (with drift)',
+            'alternative': 'Linear transformation', 'reject_null': p_value < 0.05
+        }
+    except:
+        return None
+
+
+def km_u1_test(y, p=None, max_p=12):
+    """
+    Kobayashi-McAleer U1 Test
+    Tests null hypothesis of linear integrated process (no drift) against logarithmic alternative.
+    """
+    try:
+        y = np.asarray(y).flatten()
+        n = len(y)
+        if np.any(y <= 0):
+            return None
+        
+        delta_y = np.diff(y)
+        y_lag = y[:-1]
+        
+        if p is None:
+            best_aic = np.inf
+            best_p = 0
+            for test_p in range(0, min(max_p, n // 4)):
+                try:
+                    if test_p == 0:
+                        y_temp = delta_y
+                        X = np.ones((len(y_temp), 1))
+                    else:
+                        y_temp = delta_y[test_p:]
+                        X = np.column_stack([delta_y[test_p-i:-i] for i in range(1, test_p+1)])
+                    model = sm.OLS(y_temp, X).fit()
+                    if model.aic < best_aic:
+                        best_aic = model.aic
+                        best_p = test_p
+                except:
+                    continue
+            p = best_p
+        
+        if p == 0:
+            residuals = delta_y
+        else:
+            X = np.column_stack([delta_y[p-i:-i] for i in range(1, p+1)])
+            model = sm.OLS(delta_y[p:], X).fit()
+            residuals = model.resid
+        
+        sigma_sq = np.var(residuals, ddof=1)
+        delta_y_sq = delta_y[p:]**2 if p > 0 else delta_y**2
+        y_lag_adj = y_lag[p:] if p > 0 else y_lag
+        
+        numerator = np.sum(delta_y_sq / y_lag_adj) / len(delta_y_sq)
+        U1 = numerator / sigma_sq - 1
+        
+        critical_values = {'10%': 0.477, '5%': 0.664, '1%': 1.116}
+        
+        return {
+            'statistic': U1, 'p_value': None, 'critical_values': critical_values,
+            'lag_order': p, 'drift_estimate': 0, 'variance_estimate': sigma_sq,
+            'test_type': 'U1', 'null_hypothesis': 'Linear integrated process (no drift)',
+            'alternative': 'Logarithmic transformation',
+            'reject_null': {'10%': abs(U1) > 0.477, '5%': abs(U1) > 0.664, '1%': abs(U1) > 1.116}
+        }
+    except:
+        return None
+
+
+def km_u2_test(y, p=None, max_p=12):
+    """
+    Kobayashi-McAleer U2 Test
+    Tests null hypothesis of logarithmic integrated process (no drift) against linear alternative.
+    """
+    try:
+        y = np.asarray(y).flatten()
+        n = len(y)
+        if np.any(y <= 0):
+            return None
+        
+        log_y = np.log(y)
+        delta_log_y = np.diff(log_y)
+        y_orig_lag = y[:-1]
+        
+        if p is None:
+            best_aic = np.inf
+            best_p = 0
+            for test_p in range(0, min(max_p, n // 4)):
+                try:
+                    if test_p == 0:
+                        y_temp = delta_log_y
+                        X = np.ones((len(y_temp), 1))
+                    else:
+                        y_temp = delta_log_y[test_p:]
+                        X = np.column_stack([delta_log_y[test_p-i:-i] for i in range(1, test_p+1)])
+                    model = sm.OLS(y_temp, X).fit()
+                    if model.aic < best_aic:
+                        best_aic = model.aic
+                        best_p = test_p
+                except:
+                    continue
+            p = best_p
+        
+        if p == 0:
+            residuals = delta_log_y
+        else:
+            X = np.column_stack([delta_log_y[p-i:-i] for i in range(1, p+1)])
+            model = sm.OLS(delta_log_y[p:], X).fit()
+            residuals = model.resid
+        
+        sigma_sq = np.var(residuals, ddof=1)
+        delta_log_y_sq = delta_log_y[p:]**2 if p > 0 else delta_log_y**2
+        y_orig_lag_adj = y_orig_lag[p:] if p > 0 else y_orig_lag
+        
+        numerator = np.sum(delta_log_y_sq * y_orig_lag_adj) / len(delta_log_y_sq)
+        U2 = numerator / sigma_sq - np.mean(y_orig_lag_adj)
+        
+        critical_values = {'10%': 0.477, '5%': 0.664, '1%': 1.116}
+        
+        return {
+            'statistic': U2, 'p_value': None, 'critical_values': critical_values,
+            'lag_order': p, 'drift_estimate': 0, 'variance_estimate': sigma_sq,
+            'test_type': 'U2', 'null_hypothesis': 'Logarithmic integrated process (no drift)',
+            'alternative': 'Linear transformation',
+            'reject_null': {'10%': abs(U2) > 0.477, '5%': abs(U2) > 0.664, '1%': abs(U2) > 1.116}
+        }
+    except:
+        return None
+
+
+def detect_drift(y, alpha=0.05):
+    """Detect if series has significant drift"""
+    try:
+        delta_y = np.diff(y)
+        t_stat, p_value = stats.ttest_1samp(delta_y, 0)
+        return p_value < alpha
+    except:
+        return None
+
+
+def km_test_suite(y, has_drift=None, p=None, max_p=12, alpha=0.05):
+    """Run complete Kobayashi-McAleer test suite and provide recommendation."""
+    try:
+        y = np.asarray(y).flatten()
+        if np.any(y <= 0):
+            return {'recommendation': 'NOT_APPLICABLE', 'reason': 'Series contains non-positive values.',
+                    'has_drift': None, 'test1_result': None, 'test2_result': None}
+        
+        if has_drift is None:
+            has_drift = detect_drift(y, alpha)
+        
+        if has_drift:
+            test1_result = km_v1_test(y, p, max_p)
+            test2_result = km_v2_test(y, p, max_p)
+            test1_name, test2_name = 'V1', 'V2'
+        else:
+            test1_result = km_u1_test(y, p, max_p)
+            test2_result = km_u2_test(y, p, max_p)
+            test1_name, test2_name = 'U1', 'U2'
+        
+        if test1_result is None or test2_result is None:
+            return {'recommendation': 'INCONCLUSIVE', 'reason': 'Tests could not be computed.',
+                    'has_drift': has_drift, 'test1_result': test1_result, 'test2_result': test2_result}
+        
+        if has_drift:
+            reject_linear = test1_result['reject_null']
+            reject_log = test2_result['reject_null']
+            if reject_linear and not reject_log:
+                recommendation, interpretation = 'LOGARITHMS', 'Linear null rejected, Log null not rejected → Use LOGARITHMS'
+            elif not reject_linear and reject_log:
+                recommendation, interpretation = 'LEVELS', 'Linear null not rejected, Log null rejected → Use LEVELS'
+            elif not reject_linear and not reject_log:
+                recommendation, interpretation = 'INCONCLUSIVE', 'Neither null rejected → Both transformations acceptable'
+            else:
+                recommendation, interpretation = 'INCONCLUSIVE', 'Both nulls rejected → Neither transformation clearly better'
+        else:
+            reject_linear_5 = test1_result['reject_null']['5%']
+            reject_log_5 = test2_result['reject_null']['5%']
+            if reject_linear_5 and not reject_log_5:
+                recommendation, interpretation = 'LOGARITHMS', 'Linear null rejected at 5%, Log null not rejected → Use LOGARITHMS'
+            elif not reject_linear_5 and reject_log_5:
+                recommendation, interpretation = 'LEVELS', 'Linear null not rejected, Log null rejected at 5% → Use LEVELS'
+            elif not reject_linear_5 and not reject_log_5:
+                recommendation, interpretation = 'INCONCLUSIVE', 'Neither null rejected at 5% → Both transformations acceptable'
+            else:
+                recommendation, interpretation = 'INCONCLUSIVE', 'Both nulls rejected at 5% → Neither transformation clearly better'
+        
+        return {'recommendation': recommendation, 'interpretation': interpretation, 'has_drift': has_drift,
+                'test1_result': test1_result, 'test2_result': test2_result, 
+                'test1_name': test1_name, 'test2_name': test2_name}
+    except Exception as e:
+        return {'recommendation': 'ERROR', 'reason': str(e), 'has_drift': None,
+                'test1_result': None, 'test2_result': None}
+
+
+# ==================== DESCRIPTIVE STATISTICS FUNCTIONS ====================
+
+def compute_descriptive_stats(series):
+    """Compute comprehensive descriptive statistics"""
+    clean_series = series.dropna()
+    stats_dict = {
+        'Count': len(clean_series), 'Missing': series.isna().sum(),
+        'Mean': clean_series.mean(), 'Median': clean_series.median(),
+        'Std Dev': clean_series.std(), 'Variance': clean_series.var(),
+        'Min': clean_series.min(), 'Max': clean_series.max(),
+        'Range': clean_series.max() - clean_series.min(),
+        'Q1 (25%)': clean_series.quantile(0.25), 'Q3 (75%)': clean_series.quantile(0.75),
+        'IQR': clean_series.quantile(0.75) - clean_series.quantile(0.25),
+        'Skewness': skew(clean_series), 'Kurtosis': kurtosis(clean_series),
+        'Coef. of Variation': (clean_series.std() / clean_series.mean()) * 100 if clean_series.mean() != 0 else np.nan,
+    }
+    return stats_dict
+
+
+def create_distribution_plot(series, var_name):
+    """Create distribution plot with histogram, box plot, Q-Q plot, and violin plot"""
+    fig = make_subplots(rows=2, cols=2, subplot_titles=('Histogram', 'Box Plot', 'Q-Q Plot', 'Violin Plot'))
+    clean_series = series.dropna()
+    
+    fig.add_trace(go.Histogram(x=clean_series, name='Histogram', nbinsx=30, opacity=0.7, marker_color='steelblue'), row=1, col=1)
+    fig.add_trace(go.Box(y=clean_series, name='Box Plot', marker_color='steelblue', boxmean=True), row=1, col=2)
+    
+    theoretical_quantiles = stats.norm.ppf(np.linspace(0.01, 0.99, len(clean_series)))
+    sample_quantiles = np.sort(clean_series)
+    fig.add_trace(go.Scatter(x=theoretical_quantiles, y=sample_quantiles, mode='markers', name='Q-Q', marker=dict(color='steelblue', size=5)), row=2, col=1)
+    min_val, max_val = min(theoretical_quantiles.min(), sample_quantiles.min()), max(theoretical_quantiles.max(), sample_quantiles.max())
+    fig.add_trace(go.Scatter(x=[min_val, max_val], y=[min_val, max_val], mode='lines', name='Reference', line=dict(color='red', dash='dash')), row=2, col=1)
+    fig.add_trace(go.Violin(y=clean_series, name='Violin', box_visible=True, meanline_visible=True, fillcolor='steelblue', opacity=0.7), row=2, col=2)
+    
+    fig.update_layout(height=600, title_text=f"Distribution Analysis: {var_name}", showlegend=False)
+    return fig
+
+
+def create_correlation_heatmap(data, selected_vars):
+    """Create correlation heatmap with coolwarm colorscale"""
+    corr_matrix = data[selected_vars].corr()
+    fig = go.Figure(data=go.Heatmap(
+        z=corr_matrix.values, x=corr_matrix.columns, y=corr_matrix.index,
+        colorscale='RdBu_r', zmid=0, text=np.round(corr_matrix.values, 3),
+        texttemplate='%{text}', textfont={"size": 10},
+        hovertemplate='%{x} vs %{y}<br>Correlation: %{z:.4f}<extra></extra>'
+    ))
+    fig.update_layout(title='Correlation Heatmap (Coolwarm)', height=600, width=800)
+    return fig, corr_matrix
 
 # Handle uploaded file
 if uploaded_file is not None:
@@ -92,46 +606,306 @@ if uploaded_file is not None:
 
         # Store in session state
         st.session_state.data = data
-        st.session_state.variables = data.columns.tolist()
+        st.session_state.variables = data.select_dtypes(include=[np.number]).columns.tolist()
 
         # Display data preview
-        st.subheader("Data Preview")
+        st.subheader("📋 Data Preview")
         st.dataframe(data.head(10))
 
         # Basic data info
-        st.subheader("Data Information")
+        st.subheader("📊 Data Information")
         col1, col2, col3, col4 = st.columns(4)
         col1.metric("Rows", f"{data.shape[0]}")
         col2.metric("Columns", f"{data.shape[1]}")
         col3.metric("Missing Values", f"{data.isna().sum().sum()}")
-        col4.metric("Data Type", "Numeric" if data.select_dtypes(include=[np.number]).shape[1] > 0 else "Mixed")
-
-        # Display descriptive statistics
-        with st.expander("📊 Descriptive Statistics"):
-            st.dataframe(data.describe())
+        col4.metric("Numeric Columns", f"{len(st.session_state.variables)}")
 
     except Exception as e:
         st.error(f"Error loading file: {e}")
 
 # If data is loaded, show options
 if st.session_state.data is not None:
+    data = st.session_state.data
+    
     # Variable selection
     st.sidebar.subheader("Variable Selection")
-    all_vars = st.sidebar.checkbox("Select All Variables", key="all_vars")
+    all_vars = st.sidebar.checkbox("Select All Numeric Variables", key="all_vars")
 
     if all_vars:
         selected_vars = st.session_state.variables
     else:
         selected_vars = st.sidebar.multiselect(
-            "Select Variables for Testing",
+            "Select Variables for Analysis",
             options=st.session_state.variables,
             default=st.session_state.selected_vars
         )
 
     st.session_state.selected_vars = selected_vars
-
-    # Test configuration
-    st.sidebar.subheader("Test Configuration")
+    
+    # Create tabs for different analyses
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📊 Descriptive Statistics", 
+        "🔄 Data Transformations",
+        "🔥 Correlation Analysis",
+        "📈 KM Tests (Linear vs Log)",
+        "🧪 Unit Root Tests"
+    ])
+    
+    # ==================== TAB 1: DESCRIPTIVE STATISTICS ====================
+    with tab1:
+        st.header("📊 Enhanced Descriptive Statistics")
+        if selected_vars:
+            stats_df = pd.DataFrame()
+            for var in selected_vars:
+                var_stats = compute_descriptive_stats(data[var])
+                stats_df[var] = pd.Series(var_stats)
+            
+            st.subheader("Summary Statistics Table")
+            st.dataframe(stats_df.T.style.format("{:.4f}"), use_container_width=True)
+            
+            csv_stats = stats_df.T.to_csv()
+            st.download_button(label="📥 Download Statistics as CSV", data=csv_stats,
+                             file_name="descriptive_statistics.csv", mime="text/csv")
+            
+            st.subheader("📊 Distribution Analysis")
+            dist_var = st.selectbox("Select variable for detailed distribution:", selected_vars, key="dist_var")
+            if dist_var:
+                dist_fig = create_distribution_plot(data[dist_var], dist_var)
+                st.plotly_chart(dist_fig, use_container_width=True)
+                
+                st.subheader("🔬 Normality Tests")
+                clean_series = data[dist_var].dropna()
+                col1, col2, col3 = st.columns(3)
+                
+                if len(clean_series) <= 5000:
+                    sw_stat, sw_p = shapiro(clean_series[:5000])
+                    col1.metric("Shapiro-Wilk Stat", f"{sw_stat:.4f}")
+                    col1.metric("Shapiro-Wilk p-value", f"{sw_p:.4f}")
+                    col1.write("✅ Normal" if sw_p > 0.05 else "❌ Non-normal")
+                
+                jb_stat, jb_p, jb_skew, jb_kurt = jarque_bera(clean_series)
+                col2.metric("Jarque-Bera Stat", f"{jb_stat:.4f}")
+                col2.metric("Jarque-Bera p-value", f"{jb_p:.4f}")
+                col2.write("✅ Normal" if jb_p > 0.05 else "❌ Non-normal")
+                
+                try:
+                    dp_stat, dp_p = stats.normaltest(clean_series)
+                    col3.metric("D'Agostino Stat", f"{dp_stat:.4f}")
+                    col3.metric("D'Agostino p-value", f"{dp_p:.4f}")
+                    col3.write("✅ Normal" if dp_p > 0.05 else "❌ Non-normal")
+                except:
+                    pass
+        else:
+            st.warning("⚠️ Please select at least one variable.")
+    
+    # ==================== TAB 2: DATA TRANSFORMATIONS ====================
+    with tab2:
+        st.header("🔄 Data Transformations")
+        st.markdown("Apply various transformations to prepare your data. **Note:** Some require positive values.")
+        
+        if selected_vars:
+            transform_var = st.selectbox("Select variable to transform:", selected_vars, key="transform_var")
+            if transform_var:
+                original_series = data[transform_var].dropna()
+                is_positive = (original_series > 0).all()
+                has_zeros = (original_series == 0).any()
+                has_negatives = (original_series < 0).any()
+                
+                st.info(f"**Data:** {'All positive ✅' if is_positive else 'Contains zeros/negatives ⚠️'}")
+                
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown("**Logarithmic**")
+                    do_log = st.checkbox("Natural Log (ln)", disabled=not is_positive)
+                    do_log10 = st.checkbox("Log Base 10", disabled=not is_positive)
+                    do_log1p = st.checkbox("Log(1+x)", disabled=has_negatives)
+                with col2:
+                    st.markdown("**Power**")
+                    do_sqrt = st.checkbox("Square Root", disabled=has_negatives)
+                    do_cbrt = st.checkbox("Cube Root")
+                    do_boxcox = st.checkbox("Box-Cox", disabled=not is_positive)
+                    do_yeojohnson = st.checkbox("Yeo-Johnson")
+                with col3:
+                    st.markdown("**Other**")
+                    do_inverse = st.checkbox("Inverse (1/x)", disabled=has_zeros)
+                
+                col4, col5 = st.columns(2)
+                with col4:
+                    st.markdown("**Differencing**")
+                    do_pct_change = st.checkbox("Percent Change")
+                    do_diff1 = st.checkbox("First Difference")
+                    do_diff2 = st.checkbox("Second Difference")
+                with col5:
+                    st.markdown("**Scaling**")
+                    do_standardize = st.checkbox("Standardization (Z-score)")
+                    do_minmax = st.checkbox("Min-Max (0-1)")
+                    do_robust = st.checkbox("Robust Scaling")
+                
+                if st.button("Apply Transformations", type="primary", key="apply_trans"):
+                    transformations = {'Original': (original_series, None)}
+                    if do_log: transformations['Log'] = apply_log_transform(original_series)
+                    if do_log10: transformations['Log10'] = apply_log10_transform(original_series)
+                    if do_log1p: transformations['Log1p'] = apply_log1p_transform(original_series)
+                    if do_sqrt: transformations['Sqrt'] = apply_sqrt_transform(original_series)
+                    if do_cbrt: transformations['Cbrt'] = apply_cbrt_transform(original_series)
+                    if do_boxcox: transformations['Box-Cox'] = apply_box_cox_transform(original_series)
+                    if do_yeojohnson: transformations['Yeo-Johnson'] = apply_yeo_johnson_transform(original_series)
+                    if do_inverse: transformations['Inverse'] = apply_inverse_transform(original_series)
+                    if do_pct_change: transformations['Pct_Change'] = apply_percent_change(original_series)
+                    if do_diff1: transformations['Diff1'] = apply_first_difference(original_series)
+                    if do_diff2: transformations['Diff2'] = apply_second_difference(original_series)
+                    if do_standardize: transformations['Standardized'] = apply_standardization(original_series)
+                    if do_minmax: transformations['MinMax'] = apply_minmax_normalization(original_series)
+                    if do_robust: transformations['Robust'] = apply_robust_scaling(original_series)
+                    
+                    results_df = pd.DataFrame()
+                    for name, (transformed, msg) in transformations.items():
+                        if transformed is not None:
+                            clean = transformed.dropna()
+                            results_df[name] = pd.Series({
+                                'Mean': clean.mean(), 'Std': clean.std(),
+                                'Skewness': skew(clean), 'Kurtosis': kurtosis(clean),
+                                'Min': clean.min(), 'Max': clean.max()
+                            })
+                            if msg: st.info(f"{name}: {msg}")
+                        elif msg:
+                            st.warning(f"⚠️ {name}: {msg}")
+                    
+                    st.subheader("📋 Transformation Statistics")
+                    st.dataframe(results_df.T.style.format("{:.4f}"), use_container_width=True)
+                    st.session_state.transformed_data = transformations
+        else:
+            st.warning("⚠️ Please select at least one variable.")
+    
+    # ==================== TAB 3: CORRELATION ANALYSIS ====================
+    with tab3:
+        st.header("🔥 Correlation Analysis")
+        if len(selected_vars) >= 2:
+            heatmap_fig, corr_matrix = create_correlation_heatmap(data, selected_vars)
+            st.plotly_chart(heatmap_fig, use_container_width=True)
+            
+            st.subheader("📊 Correlation Matrix")
+            st.dataframe(corr_matrix.style.background_gradient(cmap='coolwarm', vmin=-1, vmax=1).format("{:.4f}"),
+                        use_container_width=True)
+            
+            csv_corr = corr_matrix.to_csv()
+            st.download_button(label="📥 Download Correlation Matrix", data=csv_corr,
+                             file_name="correlation_matrix.csv", mime="text/csv")
+            
+            if len(selected_vars) <= 6:
+                st.subheader("📈 Pairwise Scatter Plots")
+                scatter_fig = px.scatter_matrix(data[selected_vars], dimensions=selected_vars,
+                                               color_discrete_sequence=['steelblue'], title="Scatter Matrix")
+                scatter_fig.update_layout(height=800)
+                st.plotly_chart(scatter_fig, use_container_width=True)
+        else:
+            st.warning("⚠️ Select at least 2 variables for correlation analysis.")
+    
+    # ==================== TAB 4: KM TESTS ====================
+    with tab4:
+        st.header("📈 Kobayashi-McAleer Tests for Linear vs Logarithmic Transformations")
+        st.markdown("""
+        <div class="km-test-box">
+            <h4>About Kobayashi-McAleer Tests</h4>
+            <p>These tests help determine whether to model integrated time series in <strong>levels</strong> (linear) 
+            or <strong>logarithms</strong>. Run these <strong>BEFORE</strong> unit root analysis.</p>
+            <p><strong>Reference:</strong> Kobayashi & McAleer (1999), JASA, 94(447), 860-868.</p>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.markdown("""
+        ### Test Types:
+        - **V1/V2 Tests**: For series WITH drift (p-values available)
+        - **U1/U2 Tests**: For series WITHOUT drift (critical values used)
+        
+        **⚠️ Requires strictly POSITIVE time series data.**
+        """)
+        
+        if selected_vars:
+            positive_vars = [var for var in selected_vars if (data[var].dropna() > 0).all()]
+            
+            if positive_vars:
+                st.success(f"✅ {len(positive_vars)} variable(s) are eligible for KM tests.")
+                km_var = st.selectbox("Select variable for KM test:", positive_vars, key="km_var")
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    max_p = st.slider("Maximum lag order", 1, 24, 12, key="km_lag")
+                with col2:
+                    alpha = st.selectbox("Significance level", [0.01, 0.05, 0.10], index=1, key="km_alpha")
+                
+                detect_drift_auto = st.checkbox("Auto-detect drift", value=True, key="km_drift")
+                
+                if st.button("Run KM Test Suite", type="primary", key="run_km"):
+                    with st.spinner("Running Kobayashi-McAleer tests..."):
+                        series = data[km_var].dropna().values
+                        has_drift = None if detect_drift_auto else st.radio("Has drift?", ["Yes", "No"]) == "Yes"
+                        result = km_test_suite(series, has_drift=has_drift, max_p=max_p, alpha=alpha)
+                        st.session_state.km_test_results[km_var] = result
+                        
+                        st.subheader(f"🔬 KM Test Results for {km_var}")
+                        
+                        if result['recommendation'] == 'LEVELS':
+                            st.success("### 📊 RECOMMENDATION: Model data in **LEVELS** (Linear)")
+                        elif result['recommendation'] == 'LOGARITHMS':
+                            st.success("### 📊 RECOMMENDATION: Model data in **LOGARITHMS**")
+                        elif result['recommendation'] == 'INCONCLUSIVE':
+                            st.warning("### ⚠️ RECOMMENDATION: **INCONCLUSIVE** - Both acceptable")
+                        else:
+                            st.error(f"### ❌ {result['recommendation']}: {result.get('reason', '')}")
+                        
+                        if 'interpretation' in result:
+                            st.info(f"**Interpretation:** {result['interpretation']}")
+                        
+                        st.write(f"**Drift detected:** {'Yes' if result['has_drift'] else 'No'}")
+                        
+                        col1, col2 = st.columns(2)
+                        if result['test1_result']:
+                            with col1:
+                                t1 = result['test1_result']
+                                st.markdown(f"### {result.get('test1_name', 'Test 1')} Results")
+                                st.write(f"**Null:** {t1['null_hypothesis']}")
+                                st.metric("Test Statistic", f"{t1['statistic']:.4f}")
+                                if t1['p_value'] is not None:
+                                    st.metric("p-value", f"{t1['p_value']:.4f}")
+                                    st.write("**Reject:**", "✅ Yes" if t1['reject_null'] else "❌ No")
+                                else:
+                                    for lv, cv in t1['critical_values'].items():
+                                        st.write(f"  {lv}: {cv:.3f} - {'Reject' if t1['reject_null'][lv] else 'Fail'}")
+                        
+                        if result['test2_result']:
+                            with col2:
+                                t2 = result['test2_result']
+                                st.markdown(f"### {result.get('test2_name', 'Test 2')} Results")
+                                st.write(f"**Null:** {t2['null_hypothesis']}")
+                                st.metric("Test Statistic", f"{t2['statistic']:.4f}")
+                                if t2['p_value'] is not None:
+                                    st.metric("p-value", f"{t2['p_value']:.4f}")
+                                    st.write("**Reject:**", "✅ Yes" if t2['reject_null'] else "❌ No")
+                                else:
+                                    for lv, cv in t2['critical_values'].items():
+                                        st.write(f"  {lv}: {cv:.3f} - {'Reject' if t2['reject_null'][lv] else 'Fail'}")
+                        
+                        st.subheader("📊 Visual Comparison")
+                        fig = make_subplots(rows=2, cols=2, subplot_titles=('Levels', 'Log', 'Diff Levels', 'Diff Log'))
+                        fig.add_trace(go.Scatter(y=series, mode='lines', line=dict(color='blue')), row=1, col=1)
+                        log_s = np.log(series)
+                        fig.add_trace(go.Scatter(y=log_s, mode='lines', line=dict(color='green')), row=1, col=2)
+                        fig.add_trace(go.Scatter(y=np.diff(series), mode='lines', line=dict(color='orange')), row=2, col=1)
+                        fig.add_trace(go.Scatter(y=np.diff(log_s), mode='lines', line=dict(color='red')), row=2, col=2)
+                        fig.update_layout(height=500, showlegend=False, title_text=f"Levels vs Log: {km_var}")
+                        st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.warning("⚠️ No selected variables have positive values. KM tests require positive data.")
+        else:
+            st.warning("⚠️ Please select at least one variable.")
+    
+    # ==================== TAB 5: UNIT ROOT TESTS ====================
+    with tab5:
+        st.header("🧪 Unit Root Tests")
+        
+        # Unit Root Test Configuration (in sidebar)
+        st.sidebar.subheader("Unit Root Test Configuration")
 
     # Test type selection
     test_type = st.sidebar.selectbox(
@@ -223,17 +997,50 @@ if st.session_state.data is not None:
                 trend = 'ct'
 
             # Map lag selection method to statsmodels parameter
+            # Note: statsmodels adfuller only supports 'AIC', 'BIC', 't-stat', or None
+            # For HQIC, we need to implement it manually
             ic_map = {
                 "AIC (Akaike Information Criterion)": "aic",
                 "BIC (Bayesian Information Criterion)": "bic",
                 "t-stat (Sequential t-test)": "t-stat",
-                "HQIC (Hannan-Quinn Information Criterion)": "hqic",
+                "HQIC (Hannan-Quinn Information Criterion)": "hqic",  # Custom implementation
                 "User Specified": None
             }
 
             ic = ic_map[lag_method]
 
-            if ic:
+            if ic == "hqic":
+                # Manual HQIC lag selection
+                # HQIC = -2*log(L) + 2*k*log(log(n)) where k is number of parameters
+                best_hqic = np.inf
+                best_lag = 0
+                nobs = len(series)
+                
+                for lag in range(0, max_lag + 1):
+                    try:
+                        result_temp = adfuller(series, maxlag=lag, regression=trend, autolag=None)
+                        # Approximate HQIC: use AIC but adjust penalty
+                        # From AIC = -2*log(L) + 2*k, we get log(L) = (-AIC + 2*k)/2
+                        # Number of parameters: lag + 1 (constant) + 1 (trend if ct) + 1 (gamma)
+                        k = lag + 1
+                        if trend == 'ct':
+                            k += 1
+                        elif trend == 'ctt':
+                            k += 2
+                        
+                        # Estimate sigma^2 from test statistic
+                        sigma2_est = result_temp[4].get('5%', -2.86)**2  # Approximate
+                        llf = -nobs / 2.0 * (np.log(2 * np.pi) + np.log(sigma2_est) + 1)
+                        hqic = -2 * llf + 2 * k * np.log(np.log(max(nobs, 3)))
+                        
+                        if hqic < best_hqic:
+                            best_hqic = hqic
+                            best_lag = lag
+                    except:
+                        continue
+                
+                result = adfuller(series, maxlag=best_lag, regression=trend, autolag=None)
+            elif ic:
                 result = adfuller(series, maxlag=max_lag, regression=trend, autolag=ic)
             else:
                 result = adfuller(series, maxlag=max_lag, regression=trend, autolag=None)
@@ -384,104 +1191,155 @@ if st.session_state.data is not None:
         """
         Determine the order of integration and process type using proper econometric procedure.
         
-        TS (Trend Stationary): 
-            - ONLY concluded from trend & intercept equation
-            - Requires: (1) Reject H0 of unit root (ADF/PP), (2) Trend coefficient significant
-            - Optional: Confirm with KPSS (accept H0 of stationarity)
+        IMPORTANT RULES:
         
-        DS (Difference Stationary): 
-            - Has unit root in levels (fail to reject H0 in ADF/PP)
-            - Becomes stationary after d differences
+        TS (Trend Stationary) - ONLY from trend & intercept equation:
+            - ADF & PP: p-value < 5% (reject H0 of unit root → NO unit root → stationary)
+            - KPSS: p-value > 5% (fail to reject H0 of stationarity → stationary)
+            - Trend coefficient MUST be significant (p-value < 5%)
         
-        Stationary: 
-            - I(0) without deterministic trend
+        DS (Difference Stationary):
+            - ADF & PP: p-value > 5% (fail to reject H0 of unit root → HAS unit root)
+            - KPSS: p-value < 5% (reject H0 of stationarity → NOT stationary → has unit root)
+            - Becomes stationary only after differencing
+        
+        Stationary (I(0) without trend):
+            - Same stationarity criteria but trend NOT significant
         
         Returns: (integration_order, process_type)
         """
         original_series = series.copy()
 
         # STEP 1: Test with TREND & INTERCEPT equation (required for TS detection)
+        # TS can ONLY be identified from constant & trend model
         if test_type in ["ADF (Augmented Dickey-Fuller)", "ADF and PP", "ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
             
-            # Test with constant and trend
+            # Test with constant and trend - MANDATORY for TS detection
             adf_ct = run_adf_test(original_series, "With Constant & Trend", max_lag, lag_method)
             
-            # Check for TS: must be stationary AND trend must be significant
-            if adf_ct and adf_ct['Is Stationary']:
+            if adf_ct:
+                adf_stationary = adf_ct['Is Stationary']  # True if p-value < sig_level (reject H0 of unit root)
                 trend_info = adf_ct.get('Trend Info')
+                trend_significant = trend_info['Is Trend Significant'] if trend_info else False
                 
-                # CONDITION FOR TS: Stationary from trend & intercept AND trend significant
-                if trend_info and trend_info['Is Trend Significant']:
+                # Also run PP test if selected
+                pp_stationary = None
+                if test_type in ["ADF and PP", "All Tests (ADF, PP, KPSS)"]:
+                    pp_ct = run_pp_test(original_series, "With Constant & Trend")
+                    if pp_ct and pp_ct['p-value'] is not None:
+                        pp_stationary = pp_ct['Is Stationary']
+                
+                # Run KPSS test if selected
+                kpss_stationary = None
+                if test_type in ["ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
+                    kpss_ct = run_kpss_test(original_series, "With Constant & Trend")
+                    if kpss_ct:
+                        # KPSS: H0 = stationary, H1 = unit root
+                        # p-value > 5% means fail to reject H0 → stationary
+                        # p-value < 5% means reject H0 → has unit root
+                        kpss_stationary = kpss_ct['Is Stationary']  # True if p-value > sig_level
+                
+                # =============================================
+                # CHECK FOR TS (Trend Stationary)
+                # =============================================
+                # Requirements for TS:
+                # 1. ADF: p < 5% (reject unit root = NO unit root)
+                # 2. PP (if available): p < 5% (reject unit root = NO unit root)
+                # 3. KPSS (if available): p > 5% (fail to reject = stationary)
+                # 4. Trend coefficient SIGNIFICANT
+                
+                is_ts = False
+                if adf_stationary and trend_significant:
+                    # Basic condition met from ADF
+                    is_ts = True
                     
-                    # Optional: Confirm with KPSS if available
-                    if test_type in ["ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
-                        kpss_ct = run_kpss_test(original_series, "With Constant & Trend")
-                        
-                        if kpss_ct and kpss_ct['Is Stationary']:
-                            # Both ADF and KPSS confirm stationarity, trend significant → TS
-                            return 0, 'TS'
-                        else:
-                            # ADF says stationary but KPSS says not - inconclusive
-                            # Since trend is significant and ADF rejects unit root, lean towards TS
-                            return 0, 'TS'
-                    else:
-                        # Only ADF available, trend significant → TS
-                        return 0, 'TS'
+                    # Check PP if available - must also show no unit root
+                    if pp_stationary is not None and not pp_stationary:
+                        is_ts = False  # PP says has unit root
+                    
+                    # Check KPSS if available - must confirm stationarity
+                    if kpss_stationary is not None and not kpss_stationary:
+                        # KPSS says NOT stationary (p < 5%), contradicts ADF
+                        # This is the case where ADF rejects unit root but KPSS rejects stationarity
+                        # According to statsmodels: this suggests DIFFERENCE stationary, not trend stationary
+                        is_ts = False
                 
-                else:
-                    # Stationary but trend NOT significant
-                    # Test with just constant to confirm I(0) stationary
+                if is_ts:
+                    return 0, 'TS'  # Trend Stationary
+                
+                # =============================================
+                # CHECK FOR STATIONARY (I(0) without significant trend)
+                # =============================================
+                if adf_stationary and not trend_significant:
+                    # Stationary but no significant trend
+                    # Confirm with constant-only model
                     adf_c = run_adf_test(original_series, "With Constant", max_lag, lag_method)
                     
                     if adf_c and adf_c['Is Stationary']:
                         # Confirm with KPSS if available
+                        is_stationary = True
+                        
                         if test_type in ["ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
                             kpss_c = run_kpss_test(original_series, "With Constant")
-                            if kpss_c and kpss_c['Is Stationary']:
-                                return 0, 'Stationary'  # I(0), no trend
-                        return 0, 'Stationary'  # I(0), no trend
+                            if kpss_c and not kpss_c['Is Stationary']:
+                                is_stationary = False  # KPSS rejects stationarity
+                        
+                        if is_stationary:
+                            return 0, 'Stationary'  # I(0), no trend
             
-            # STEP 2: NOT stationary at level → Test for DS by differencing
-            # Has unit root (failed to reject H0 in ADF with trend & intercept)
+            # =============================================
+            # CHECK FOR DS (Difference Stationary)
+            # =============================================
+            # If we reach here, the series is NOT stationary at level
+            # This means: ADF p > 5% (has unit root) OR KPSS p < 5% (not stationary)
+            # → This is DS if it becomes stationary after differencing
             
             if max_diff >= 1:
                 first_diff = original_series.diff().dropna()
                 if len(first_diff) > 10:
-                    # Test first difference with constant (standard for differenced series)
-                    first_diff_result = run_adf_test(first_diff, "With Constant", max_lag, lag_method)
+                    # Test first difference with constant only (standard for differenced series)
+                    first_diff_adf = run_adf_test(first_diff, "With Constant", max_lag, lag_method)
                     
-                    if first_diff_result and first_diff_result['Is Stationary']:
-                        # Confirm with KPSS if available
+                    if first_diff_adf and first_diff_adf['Is Stationary']:
+                        # ADF says first diff is stationary (p < 5%)
+                        # Confirm with KPSS: should also say stationary (p > 5%)
+                        
+                        confirmed = True
                         if test_type in ["ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
                             kpss_diff = run_kpss_test(first_diff, "With Constant")
-                            if kpss_diff and kpss_diff['Is Stationary']:
-                                return 1, 'DS'  # I(1) Difference Stationary
+                            if kpss_diff and not kpss_diff['Is Stationary']:
+                                # KPSS says NOT stationary even after differencing
+                                confirmed = False
                         
-                        # Unit root in levels, stationary after 1st diff → DS
-                        return 1, 'DS'
+                        if confirmed:
+                            return 1, 'DS'  # I(1) Difference Stationary
             
             # STEP 3: Test second difference
             if max_diff >= 2:
+                first_diff = original_series.diff().dropna()
                 second_diff = first_diff.diff().dropna()
                 if len(second_diff) > 10:
-                    second_diff_result = run_adf_test(second_diff, "With Constant", max_lag, lag_method)
+                    second_diff_adf = run_adf_test(second_diff, "With Constant", max_lag, lag_method)
                     
-                    if second_diff_result and second_diff_result['Is Stationary']:
-                        # Confirm with KPSS if available
+                    if second_diff_adf and second_diff_adf['Is Stationary']:
+                        confirmed = True
                         if test_type in ["ADF and KPSS", "All Tests (ADF, PP, KPSS)"]:
                             kpss_diff2 = run_kpss_test(second_diff, "With Constant")
-                            if kpss_diff2 and kpss_diff2['Is Stationary']:
-                                return 2, 'DS'  # I(2) Difference Stationary
+                            if kpss_diff2 and not kpss_diff2['Is Stationary']:
+                                confirmed = False
                         
-                        return 2, 'DS'  # I(2) Difference Stationary
+                        if confirmed:
+                            return 2, 'DS'  # I(2) Difference Stationary
             
             # STEP 4: Test third difference (if requested)
             if max_diff >= 3:
+                first_diff = original_series.diff().dropna()
+                second_diff = first_diff.diff().dropna()
                 third_diff = second_diff.diff().dropna()
                 if len(third_diff) > 10:
-                    third_diff_result = run_adf_test(third_diff, "With Constant", max_lag, lag_method)
+                    third_diff_adf = run_adf_test(third_diff, "With Constant", max_lag, lag_method)
                     
-                    if third_diff_result and third_diff_result['Is Stationary']:
+                    if third_diff_adf and third_diff_adf['Is Stationary']:
                         return 3, 'DS'  # I(3) Difference Stationary
 
         # If not stationary after max_diff differences
@@ -1253,17 +2111,28 @@ The fundamental difference:
 
 **6. Available Tests:**
 - **ADF (Augmented Dickey-Fuller)**: H0: Unit root present (non-stationary)
-  - Reject H0 → Series is stationary
-  - Fail to reject H0 → Series has unit root
+  - **p-value < 5%** → Reject H0 → Series is stationary (NO unit root)
+  - **p-value > 5%** → Fail to reject H0 → Series has unit root
   
 - **PP (Phillips-Perron)**: H0: Unit root present (non-stationary)
+  - **p-value < 5%** → Reject H0 → Series is stationary (NO unit root)
+  - **p-value > 5%** → Fail to reject H0 → Series has unit root
   - Similar to ADF but non-parametric correction for serial correlation
-  - More robust to heteroskedasticity
   
-- **KPSS**: H0: Series is stationary
-  - Reject H0 → Series is non-stationary
-  - Fail to reject H0 → Series is stationary
+- **KPSS**: H0: Series is stationary (OPPOSITE hypothesis)
+  - **p-value > 5%** → Fail to reject H0 → Series IS stationary
+  - **p-value < 5%** → Reject H0 → Series has unit root (NOT stationary)
   - **Complementary** to ADF/PP (reversed hypothesis)
+
+**Identification Rules:**
+- **DS (Difference Stationary)**: 
+  - ADF/PP: p > 5% (can't reject unit root) 
+  - KPSS: p < 5% (reject stationarity)
+  
+- **TS (Trend Stationary)** - ONLY from constant & trend model:
+  - ADF/PP: p < 5% (reject unit root = stationary)
+  - KPSS: p > 5% (fail to reject stationarity)
+  - Trend coefficient MUST be significant (p < 5%)
 
 **7. Test Specifications:**
 - **With Constant & Trend (ct)**: Use for TS detection and general testing
@@ -1271,10 +2140,10 @@ The fundamental difference:
 - **Without Constant & Trend (nc)**: Rarely used, specific cases only
 
 **8. Lag Selection Methods:**
-- **AIC**: Akaike Information Criterion (allows more lags)
-- **BIC**: Bayesian Information Criterion (more parsimonious)
-- **t-stat**: Sequential t-test for lag significance
-- **HQIC**: Hannan-Quinn Information Criterion (middle ground)
+- **AIC**: Akaike Information Criterion (allows more lags) - native statsmodels support
+- **BIC**: Bayesian Information Criterion (more parsimonious) - native statsmodels support
+- **t-stat**: Sequential t-test for lag significance - native statsmodels support
+- **HQIC**: Hannan-Quinn Information Criterion (middle ground) - custom implementation (not natively supported by statsmodels)
 
 **9. Economic Implications:**
 
@@ -1299,7 +2168,15 @@ The fundamental difference:
 - Phillips, P. C., & Perron, P. (1988). Testing for a unit root in time series regression. *Biometrika*.
 - Kwiatkowski, D., et al. (1992). Testing the null hypothesis of stationarity against the alternative of a unit root. *Journal of Econometrics*.
 - Nelson, C. R., & Plosser, C. I. (1982). Trends and random walks in macroeconomic time series. *Journal of Monetary Economics*.
+- Kobayashi, M. and McAleer, M. (1999). Tests of Linear and Logarithmic Transformations for Integrated Processes. *Journal of the American Statistical Association*, 94(447), 860-868.
 
 ---
-**Version**: 2.1 | **Developed for**: Advanced Econometric Time Series Analysis
+**Version**: 3.0 | **Author**: Dr. Merwan Roudane | **Email**: merwanroudane920@gmail.com
+
+**Features Added in v3.0:**
+- Enhanced Descriptive Statistics with interactive visualizations
+- Data Transformations (Log, Percent Change, Difference, Standardized, Normalized, Box-Cox, Yeo-Johnson)
+- Correlation Heatmap with coolwarm colorscale
+- Kobayashi-McAleer Tests (V1, V2, U1, U2) for linear vs logarithmic transformation selection
+- Improved Plotly visualizations throughout
 """)
